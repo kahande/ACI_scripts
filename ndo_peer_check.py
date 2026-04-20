@@ -19,6 +19,8 @@ Logs into NDO, fetches all tenants, then for each tenant calls
 /mso/api/v1/policy-report and checks that peerContexts is symmetric
 across ALL sites for every EPG, External EPG (L3Out instP), and VRF.
 
+Requires Python 3.6+ (f-strings, pathlib, etc). No external dependencies.
+
 Usage:
   python3 ndo_peer_check.py
   python3 ndo_peer_check.py --ndo 10.197.205.114
