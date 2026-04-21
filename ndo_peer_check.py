@@ -40,7 +40,7 @@ Exit codes:
   130  Interrupted (Ctrl+C)
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 import argparse
 import getpass
@@ -75,10 +75,10 @@ def _ssl_ctx(verify=True):
     return ctx
 
 
-def _get(url, token, timeout=DEFAULT_TIMEOUT, verify=True):
+def _get(url, token, timeout=DEFAULT_TIMEOUT, ctx=None):
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
-        with urllib.request.urlopen(req, context=_ssl_ctx(verify), timeout=timeout) as r:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")[:300]
@@ -87,7 +87,7 @@ def _get(url, token, timeout=DEFAULT_TIMEOUT, verify=True):
         sys.exit(f"[ERROR] GET {url} → {e.reason}")
 
 
-def _post(url, payload, timeout=DEFAULT_TIMEOUT, verify=True):
+def _post(url, payload, timeout=DEFAULT_TIMEOUT, ctx=None, fatal=True):
     data = json.dumps(payload).encode()
     req = urllib.request.Request(
         url, data=data,
@@ -95,9 +95,11 @@ def _post(url, payload, timeout=DEFAULT_TIMEOUT, verify=True):
         method="POST"
     )
     try:
-        with urllib.request.urlopen(req, context=_ssl_ctx(verify), timeout=timeout) as r:
+        with urllib.request.urlopen(req, context=ctx, timeout=timeout) as r:
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
+        if not fatal:
+            return None
         body = e.read().decode(errors="replace")[:300]
         sys.exit(f"[ERROR] POST {url} → HTTP {e.code}: {body}")
     except urllib.error.URLError as e:
@@ -106,22 +108,24 @@ def _post(url, payload, timeout=DEFAULT_TIMEOUT, verify=True):
 
 # ── Authentication ─────────────────────────────────────────────────────────────
 
-def login(base, user, pw, timeout=DEFAULT_TIMEOUT, verify=True):
+def login(base, user, pw, timeout=DEFAULT_TIMEOUT, ctx=None):
     """
     Tries the two common NDO login endpoints and returns a bearer token.
     Postman collection uses /login with userName/userPasswd/domain.
     Newer NDO versions use /api/v1/auth/login with username/password.
     """
     # Attempt 1: legacy /login (matches the Postman collection)
+    # fatal=False allows fallthrough to attempt 2 on HTTP errors (e.g. 404/405)
     d = _post(f"{base}/login", {"userName": user, "userPasswd": pw, "domain": "DefaultAuth"},
-              timeout=timeout, verify=verify)
-    token = d.get("jwttoken") or d.get("token") or d.get("jwtToken") or d.get("accessToken")
-    if token:
-        return token
+              timeout=timeout, ctx=ctx, fatal=False)
+    if d is not None:
+        token = d.get("jwttoken") or d.get("token") or d.get("jwtToken") or d.get("accessToken")
+        if token:
+            return token
 
     # Attempt 2: newer /api/v1/auth/login
     d = _post(f"{base}/api/v1/auth/login", {"username": user, "password": pw},
-              timeout=timeout, verify=verify)
+              timeout=timeout, ctx=ctx)
     token = d.get("token") or d.get("jwtToken") or d.get("accessToken")
     if token:
         return token
@@ -132,22 +136,22 @@ def login(base, user, pw, timeout=DEFAULT_TIMEOUT, verify=True):
 
 # ── Data fetching ──────────────────────────────────────────────────────────────
 
-def fetch_tenants(base, token, timeout=DEFAULT_TIMEOUT, verify=True):
+def fetch_tenants(base, token, timeout=DEFAULT_TIMEOUT, ctx=None):
     """Returns list of {id, name} dicts."""
-    d = _get(f"{base}/mso/api/v1/tenants", token, timeout=timeout, verify=verify)
+    d = _get(f"{base}/mso/api/v1/tenants", token, timeout=timeout, ctx=ctx)
     items = d.get("tenants", d) if isinstance(d, dict) else d
     return [{"id": t["id"], "name": t["name"]} for t in items if "id" in t and "name" in t]
 
 
-def fetch_policy_report(base, token, tenant_name, timeout=DEFAULT_TIMEOUT, verify=True):
+def fetch_policy_report(base, token, tenant_name, timeout=DEFAULT_TIMEOUT, ctx=None):
     """Returns raw policy-report dict for a single tenant."""
     tenant_enc = urllib.parse.quote(tenant_name, safe="")
     url = f"{base}/mso/api/v1/policy-report?tenants={tenant_enc}&validate=true"
-    return _get(url, token, timeout=timeout, verify=verify)
+    return _get(url, token, timeout=timeout, ctx=ctx)
 
 
 def fetch_epg_schema_map(base, token, tenant_id_to_name,
-                         timeout=DEFAULT_TIMEOUT, verify=True):
+                         timeout=DEFAULT_TIMEOUT, ctx=None):
     """
     Loads all schemas and returns a lookup:
       (tenant_name, ap_name, epg_name) → [(schema_display_name, template_name), ...]
@@ -160,13 +164,13 @@ def fetch_epg_schema_map(base, token, tenant_id_to_name,
     """
     epg_map = defaultdict(list)  # (tenant, ap_or_l3out, epg_or_instP) → [(schema, template)]
 
-    d = _get(f"{base}/mso/api/v1/schemas", token, timeout=timeout, verify=verify)
+    d = _get(f"{base}/mso/api/v1/schemas", token, timeout=timeout, ctx=ctx)
     summaries = d.get("schemas", [])
 
     for s in summaries:
         sid = s.get("id")
         sname = s.get("displayName", sid)
-        full = _get(f"{base}/mso/api/v1/schemas/{sid}", token, timeout=timeout, verify=verify)
+        full = _get(f"{base}/mso/api/v1/schemas/{sid}", token, timeout=timeout, ctx=ctx)
         for tmpl in full.get("templates", []):
             tname = tmpl.get("name", "")
             tid = tmpl.get("tenantId", "")
@@ -244,9 +248,7 @@ def analyse_tenant(report, tenant_name):
     for dn, site_ctxs in by_dn.items():
         if len(site_ctxs) < 2:
             continue
-        union = set()
-        for ctxs in site_ctxs.values():
-            union |= ctxs
+        union = set().union(*site_ctxs.values())
         if not union:
             continue
         for site, ctxs in site_ctxs.items():
@@ -308,7 +310,7 @@ def _parse_dn_parts(dn):
     return None
 
 
-def print_report(all_gaps, verbose, epg_schema_map=None, all_validation_errors=None):
+def print_report(all_gaps, verbose, epg_schema_map=None, all_validation_errors=None, tenants_checked=0):
     SEP  = "─" * 72
     WIDE = "═" * 72
 
@@ -391,12 +393,10 @@ def print_report(all_gaps, verbose, epg_schema_map=None, all_validation_errors=N
         print(WIDE)
 
     # Summary
-    all_tenants_affected = set(g["tenant"] for g in all_gaps) | \
-                           set(v["tenant"] for v in (all_validation_errors or []))
     print(f"\n\n{WIDE}")
     print(f"  SUMMARY")
     print(SEP)
-    print(f"  Tenants checked  : {len(by_tenant) or len(all_tenants_affected)}")
+    print(f"  Tenants checked  : {tenants_checked}")
     print(f"  Objects affected : {unique_objects}")
     print(f"  Gap entries total: {len(all_gaps)}")
     print(f"    EPG gaps       : {sum(1 for g in all_gaps if g['type'] == 'EPG')}")
@@ -482,16 +482,17 @@ def main():
     if not verify:
         print("[WARN] SSL certificate verification is DISABLED (--no-verify). "
               "Ensure you are on a trusted network.", file=sys.stderr)
+    ctx = _ssl_ctx(verify)
 
     try:
         # ── Login ──
         print(f"\n[*] Logging in to {args.ndo} as '{args.user}' ...")
-        token = login(args.ndo, args.user, args.password, timeout=timeout, verify=verify)
+        token = login(args.ndo, args.user, args.password, timeout=timeout, ctx=ctx)
         print("[*] Login successful.")
 
         # ── Tenants ──
         print("[*] Fetching tenants ...")
-        all_tenants = fetch_tenants(args.ndo, token, timeout=timeout, verify=verify)
+        all_tenants = fetch_tenants(args.ndo, token, timeout=timeout, ctx=ctx)
 
         if args.tenant:
             wanted = {t.strip() for t in args.tenant.split(",") if t.strip()}
@@ -515,7 +516,7 @@ def main():
             name = t["name"]
             print(f"  → {name} ...", end=" ", flush=True)
             report = fetch_policy_report(args.ndo, token, name,
-                                         timeout=timeout, verify=verify)
+                                         timeout=timeout, ctx=ctx)
             site_map, gaps, v_errors = analyse_tenant(report, name)
             sites_str = ", ".join(site_map.values()) if site_map else "?"
             v_str = f", {len(v_errors)} validation error(s)" if v_errors else ""
@@ -529,14 +530,15 @@ def main():
             print("[*] Loading schemas for template/schema info ...")
             tenant_id_to_name = {t["id"]: t["name"] for t in all_tenants}
             epg_schema_map = fetch_epg_schema_map(
-                args.ndo, token, tenant_id_to_name, timeout=timeout, verify=verify)
+                args.ndo, token, tenant_id_to_name, timeout=timeout, ctx=ctx)
 
         # ── Report ──
-        print_report(all_gaps, args.verbose, epg_schema_map, all_validation_errors)
+        print_report(all_gaps, args.verbose, epg_schema_map, all_validation_errors,
+                     tenants_checked=len(tenants))
 
         # ── Save ──
         if args.save:
-            with open(args.save, "w") as f:
+            with open(args.save, "w", encoding="utf-8") as f:
                 json.dump(all_gaps, f, indent=2)
             print(f"[*] Results saved to: {args.save}")
 
