@@ -25,7 +25,7 @@ Usage:
   python3 ndo_peer_check.py
   python3 ndo_peer_check.py --ndo 10.197.205.114
   python3 ndo_peer_check.py --ndo 10.197.205.114 --user admin
-  python3 ndo_peer_check.py ... --tenant OTP-MGMT,PWR-SCADA   # limit tenants
+  python3 ndo_peer_check.py ... --tenant ABCD,TEST             # limit tenants
   python3 ndo_peer_check.py ... --verbose                      # show full per-site lists
   python3 ndo_peer_check.py ... --save gaps.json               # save results to JSON
   python3 ndo_peer_check.py ... --no-verify                    # skip SSL cert check
